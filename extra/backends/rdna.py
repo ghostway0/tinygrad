@@ -47,28 +47,21 @@ asm_for_op: Dict[Tuple[Ops, ...], Callable] = {
   (Ops.IDIV,): lambda ctx, d, a, b, dt, name: f"v_div_fixup_{name} {d}, {a}, {b}, {a}",
   (Ops.MAX,): lambda ctx, d, a, b, dt, name: f"v_max_{name} {d}, {a}, {b}" if dtypes.is_float(dt) else f"v_max_u32 {d}, {a}, {b}",
   (Ops.MOD,): lambda ctx, d, a, b, dt, name: asm_emulated_mod(ctx, d, a, b, dt, name),
-  (Ops.CMPLT,): lambda ctx, d, a, b, dt, name: f"v_cmp_lt_{name} {d}, {a}, {b}" if dtypes.is_float(dt) else f"v_cmp_lt_u32 {d}, {a}, {b}",
-  (Ops.CMPNE,): lambda ctx, d, a, b, dt, name: f"v_cmp_ne_{name} {d}, {a}, {b}" if dtypes.is_float(dt) else f"v_cmp_ne_u32 {d}, {a}, {b}",
+  (Ops.CMPLT,): lambda ctx, d, a, b, dt, name: f"v_cmp_nge_{name} {d}, {a}, {b}" if dtypes.is_float(dt) else f"v_cmp_lt_u32 {d}, {a}, {b}",
+  (Ops.CMPNE,): lambda ctx, d, a, b, dt, name: f"v_cmp_neq_{name} {d}, {a}, {b}" if dtypes.is_float(dt) else f"v_cmp_neq_u32 {d}, {a}, {b}",
   (Ops.MULACC,): lambda ctx, d, a, b, c, dt, name: (
     f"v_fmac_{name} {d}, {a}, {b}, {c}" if dtypes.is_float(dt) else f"v_mad_{name} {d}, {a}, {b}, {c}"),
   (Ops.WHERE,): lambda ctx, d, a, b, c, dt, name: ([
-    f"v_cmp_ne_{name} vcc, {a}, 0",
+    f"v_cmp_neq_{name} vcc, {a}, 0",
     f"v_cndmask_b32 {d}, {c}, {b}, vcc"
   ])
 }
 
-def render_val(x, dtype):
-  if dtypes.is_float(dtype):
-    if dtype == dtypes.double: return "0d%02X%02X%02X%02X%02X%02X%02X%02X" % tuple(struct.pack("d",x)[::-1])
-    if dtype == dtypes.half: return "0x%02X%02X" % tuple(struct.pack("e",x)[::-1])
-    return "0f%02X%02X%02X%02X" % tuple(struct.pack("f",x)[::-1])
-  return str(int(x)) + ("U" if dtypes.is_unsigned(dtype) else "")
-
 supports_half: List[Ops] = [Ops.EXP2, Ops.ADD, Ops.MUL, Ops.MAX, Ops.CMPLT, Ops.WHERE]
 doesnt_support_half: Tuple[Ops, ...] = tuple(op for op in asm_for_op.keys() if op not in supports_half)
 rdna3_rewrite = PatternMatcher([
-  (UPat(Ops.CONST, name="x", dtype=dtypes.bool), lambda ctx, x: f"v_cmp_ne_u32 {ctx.r[x]}, {render_val(x.arg, dtypes.int32)}, 0"),
-  (UPat(Ops.CONST, name="x"), lambda ctx, x: f"v_mov_b32 {ctx.r[x]}, {render_val(x.arg, x.dtype)}"),
+  (UPat(Ops.CONST, name="x", dtype=dtypes.bool), lambda ctx, x: f"v_cmp_ne_u32 {ctx.r[x]}, {str(x.arg)}, 0"),
+  (UPat(Ops.CONST, name="x"), lambda ctx, x: f"v_mov_b32 {ctx.r[x]}, {str(x.arg)}"),
 
   *[
     (UPat(op, name="x"), lambda ctx, x, op=op: asm_for_op[(op,)](
@@ -95,7 +88,7 @@ rdna3_rewrite = PatternMatcher([
     lambda ctx, x: asm_for_op[(Ops.MOD,)](ctx, ctx.r[x], ctx.r[x.src[0]], ctx.r[x.src[1]], x.dtype, ctx.types[x.dtype])),
 
   (UPat(Ops.LOAD, name="x", src=(UPat.var("ptr"), UPat.var("offset"))), lambda ctx, x, ptr, offset: (
-    f"s_load_{ctx.types[x.dtype]} {ctx.r[x]}, {ctx.r[ptr]}, {ctx.r[offset]}" if x.dtype.count == 1 else
+    f"s_load_b32 {ctx.r[x]}, {ctx.r[ptr]}, {ctx.r[offset]}" if x.dtype.count == 1 and ctx.r[x].startswith('s') else
     f"global_load_b{32 * x.dtype.count} {ctx.r[x]}, {ctx.r[ptr]}, {ctx.r[offset]}"
   )),
 
