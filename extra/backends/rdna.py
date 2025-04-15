@@ -66,29 +66,30 @@ def get_reg_range(reg: str) -> List[int]:
   return [int(reg[i:])]
 
 def get_regs_contained(reg: str) -> List[int]:
-  if 
+  if reg == 'vcc':
+    return reg
+
   if '[' in reg:
     a, *b = reg[reg.index('[')+1 : reg.index(']')].split(':')
-    return [f"{reg[0]}{a}"] if not b else list(range(int(a), int(b[0]) + 1))
-  i = next(i for i, c in enumerate(reg) if c.isdigit())
-  return [int(reg[i:])]
+    return [f"{reg[0]}{a}"] if not b else [f"{reg[0]{i}}" for i in range(int(a), int(b[0]) + 1)]
+  return [reg]
 
 def render_addr_calc(ctx, ptr, offset) -> Tuple[List[str], str, str]:
   instructions = []
   ptr = ctx.r[ptr]
   offset = ctx.r[offset]
 
-  ptr_lo, ptr_hi = get_reg_range(ptr)
-  offset_is_scalar = is_scalar(offset_name)
-  ptr_lo_is_scalar = is_scalar(ptr_lo)
-  ptr_hi_is_scalar = is_scalar(ptr_hi)
+  ptr_lo, ptr_hi = get_regs_contained(ptr)
+  offset_is_scalar = 
+  ptr_lo_is_scalar = 
+  ptr_hi_is_scalar = 
 
   addr_lo_v, addr_hi_v, _ = ctx.tmp_vregs() # Get temps for results
 
   # --- Low 32-bit add: addr_lo_v = ptr_lo + offset_name ---
   # Ensure second operand (S1) is VGPR for v_add_co_ci_u32
-  if offset_is_scalar:
-    if ptr_lo_is_scalar: # S+S -> need offset in VGPR for S1
+  if offset[0] == 's':
+    if ptr_lo[0] == 's': # S+S -> need offset in VGPR for S1
       temp_offset_v, _, _ = ctx.tmp_vregs()
       instructions.append(f"v_mov_b32 {temp_offset_v}, {offset_name}")
       instructions.append(f"v_add_co_ci_u32 {addr_lo_v}, {ptr_lo}, {temp_offset_v}") # S0=SGPR, S1=VGPR
@@ -100,7 +101,7 @@ def render_addr_calc(ctx, ptr, offset) -> Tuple[List[str], str, str]:
 
   # --- High 32-bit add: addr_hi_v = ptr_hi + 0 + carry ---
   # S1 must be VGPR. If ptr_hi is SGPR, it needs to be moved.
-  if ptr_hi_is_scalar:
+  if ptr_hi[0] == 's':
     temp_hi_v, _, _ = ctx.tmp_vregs()
     instructions.append(f"v_mov_b32 {temp_hi_v}, {ptr_hi}")
     instructions.append(f"v_add_co_ci_u32 {addr_hi_v}, 0, {temp_hi_v}") # S0=imm, S1=VGPR
@@ -109,54 +110,39 @@ def render_addr_calc(ctx, ptr, offset) -> Tuple[List[str], str, str]:
 
   return instructions, addr_lo_v, addr_hi_v
 
-# --- Load/Store Implementations ---
-
 def render_load(ctx, x, ptr, offset_reg) -> List[str]:
-  """Generates instructions for x = FLAT_LOAD(ptr + offset_reg)"""
-  # Determine load size (in bits) from destination register/type info
-  load_bits = 32 * ctx.r[x].dtype.count # Assuming ctx.r[x].dtype.count exists
+  load_bits = 32 * x.dtype.count
 
   addr_setup_ins, addr_lo_v, addr_hi_v = render_addr_calc(ctx, ptr, offset_reg)
 
-  vdata_reg = get_reg_name(ctx.r[x])
-
-  # FLAT format uses v[lo:hi] for address
-  load_ins = f"flat_load_b{load_bits} {vdata_reg}, v[{addr_lo_v}:{addr_hi_v}] offset:0"
+  load_ins = f"flat_load_b{load_bits} {ctx.r[x]}, v[{addr_lo_v}:{addr_hi_v}] offset:0"
   return addr_setup_ins + [load_ins]
 
 def render_store(ctx, ptr, offset_reg, val) -> List[str]:
-  """Generates instructions for FLAT_STORE(ptr + offset_reg, val)"""
-  # Determine store size (in bits) based on the value register
-  val_reg = ctx.r[val]
-  store_bits = 32 * get_reg_count(val_reg)
-
+  store_bits = 32 * x.dtype.count
   addr_setup_ins, addr_lo_v, addr_hi_v = render_addr_calc(ctx, ptr, offset_reg)
-
-  vdata_reg = get_reg_name(val_reg)
-
-  # FLAT format uses v[lo:hi] for address
-  store_ins = f"flat_store_b{store_bits} v[{addr_lo_v}:{addr_hi_v}], {vdata_reg} offset:0"
+  store_ins = f"flat_store_b{store_bits} v[{addr_lo_v}:{addr_hi_v}], {ctx.r[val]} offset:0"
   return addr_setup_ins + [store_ins]
 
-def render_load(ctx, x, ptr, offset) -> List[str]:
-  t0, t1, _ = ctx.tmp_vregs()
-  rt = ctx.r[ptr][0]
-  ptr_lo, ptr_hi = get_reg_range(ctx.r[ptr])
-  return [
-    f"v_add_u32 {t0}, {rt}{ptr_lo}, {ctx.r[offset]}",     # t0 = ptr_lo + offset
-    f"v_add_co_ci_u32 {t1}, 0, {rt}{ptr_hi}",             # t1 = ptr_hi + carry-in from vcc
-    f"flat_load_b{32 * x.dtype.count} {ctx.r[x]}, v[{t0[-1]}:{t1[-1]}]"
-  ]
-
-def render_store(ctx, x, ptr, offset, val) -> List[str]:
-  t0, t1, _ = ctx.tmp_vregs()
-  rt = ctx.r[ptr][0]
-  ptr_lo, ptr_hi = get_reg_range(ctx.r[ptr])
-  return [
-    f"v_add_co_ci_u32 {t0}, {rt}{ptr_lo}, {ctx.r[offset]}",     # t0 = ptr_lo + offset
-    f"v_add_co_ci_u32 {t1}, {rt}{ptr_hi}, 0",          # t1 = ptr_hi + carry-in from vcc
-    f"flat_store_b{32 * x.src[2].dtype.count} v[{t0[-1]}:{t1[-1]}], {ctx.r[val]}"
-  ]
+# def render_load(ctx, x, ptr, offset) -> List[str]:
+#   t0, t1, _ = ctx.tmp_vregs()
+#   rt = ctx.r[ptr][0]
+#   ptr_lo, ptr_hi = get_reg_range(ctx.r[ptr])
+#   return [
+#     f"v_add_u32 {t0}, {rt}{ptr_lo}, {ctx.r[offset]}",     # t0 = ptr_lo + offset
+#     f"v_add_co_ci_u32 {t1}, 0, {rt}{ptr_hi}",             # t1 = ptr_hi + carry-in from vcc
+#     f"flat_load_b{32 * x.dtype.count} {ctx.r[x]}, v[{t0[-1]}:{t1[-1]}]"
+#   ]
+#
+# def render_store(ctx, x, ptr, offset, val) -> List[str]:
+#   t0, t1, _ = ctx.tmp_vregs()
+#   rt = ctx.r[ptr][0]
+#   ptr_lo, ptr_hi = get_reg_range(ctx.r[ptr])
+#   return [
+#     f"v_add_co_ci_u32 {t0}, {rt}{ptr_lo}, {ctx.r[offset]}",     # t0 = ptr_lo + offset
+#     f"v_add_co_ci_u32 {t1}, {rt}{ptr_hi}, 0",          # t1 = ptr_hi + carry-in from vcc
+#     f"flat_store_b{32 * x.src[2].dtype.count} v[{t0[-1]}:{t1[-1]}], {ctx.r[val]}"
+#   ]
 
 
 supports_half: List[Ops] = [Ops.EXP2, Ops.ADD, Ops.MUL, Ops.MAX, Ops.CMPLT, Ops.WHERE]
