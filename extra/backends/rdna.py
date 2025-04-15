@@ -56,7 +56,7 @@ asm_for_op: Dict[Tuple[Ops, ...], Callable] = {
   (Ops.CMPLT,): lambda ctx, d, a, b, dt, name: f"v_cmp_lt_{name} {a}, {b}",
   (Ops.CMPNE,): lambda ctx, d, a, b, dt, name: f"v_cmp_neq_{name} {a}, {b}",
   (Ops.MULACC,): lambda ctx, a, b, c, dt, name: (
-    f"v_fmac_{name} {a}, {b}, {c}" if dtypes.is_float(dt) else f"v_mad_{name} {a}, {b}, {c}"),
+    f"v_fmac_{name} {c}, {a}, {b}" if dtypes.is_float(dt) else f"v_mad_{name} {c}, {a}, {b}, {c}"),
   (Ops.WHERE,): lambda ctx, d, a, b, c, dt, name: render_where(ctx, d, a, b, c, dt, name),
 }
 
@@ -70,7 +70,6 @@ def get_reg_range(reg: str) -> List[int]:
 def get_regs_contained(reg: str) -> List[int]:
   if reg == 'vcc':
     return reg
-
   if '[' in reg:
     a, *b = reg[reg.index('[')+1 : reg.index(']')].split(':')
     return [f"{reg[0]}{a}"] if not b else [f"{reg[0]}{i}" for i in range(int(a), int(b[0]) + 1)]
@@ -78,9 +77,7 @@ def get_regs_contained(reg: str) -> List[int]:
 
 def render_reg_range(p: str, regs: List[str]) -> str:
   r = list(sorted(reduce(add, map(get_reg_range, regs))))
-  if len(r) == 1:
-    return f"{p}{r[0]}"
-  return f"{p}[{r[0]}:{r[-1]}]"
+  return f"{p}{r[0]}" if len(r) == 1 else f"{p}[{r[0]}:{r[-1]}]"
 
 def render_addr_calc(ctx, ptr, offset) -> Tuple[List[str], str, str]:
   instructions = []
@@ -88,7 +85,7 @@ def render_addr_calc(ctx, ptr, offset) -> Tuple[List[str], str, str]:
   offset = ctx.r[offset]
 
   ptr_lo, ptr_hi = get_regs_contained(ptr)
-  addr_lo_v, addr_hi_v, _ = ctx.tmp_vregs() # Get temps for results
+  addr_lo_v, addr_hi_v, temp_hi_v = ctx.tmp_vregs() # Get temps for results
 
   if offset[0] == 's':
     if ptr_lo[0] == 's': # S+S -> need offset in VGPR for S1
@@ -104,7 +101,6 @@ def render_addr_calc(ctx, ptr, offset) -> Tuple[List[str], str, str]:
   # --- High 32-bit add: addr_hi_v = ptr_hi + 0 + carry ---
   # S1 must be VGPR. If ptr_hi is SGPR, it needs to be moved.
   if ptr_hi[0] == 's':
-    temp_hi_v, _, _ = ctx.tmp_vregs()
     instructions.append(f"v_mov_b32 {temp_hi_v}, {ptr_hi}")
     instructions.append(f"v_add_co_ci_u32 {addr_hi_v}, 0, {temp_hi_v}") # S0=imm, S1=VGPR
   else: # ptr_hi is VGPR
@@ -126,27 +122,6 @@ def render_store(ctx, x, ptr, offset, val) -> List[str]:
   store_ins = f"flat_store_b{store_bits} {render_reg_range('v', [addr_lo_v, addr_hi_v])}, {ctx.r[val]} offset:0"
   return addr_setup_ins + [store_ins]
 
-# def render_load(ctx, x, ptr, offset) -> List[str]:
-#   t0, t1, _ = ctx.tmp_vregs()
-#   rt = ctx.r[ptr][0]
-#   ptr_lo, ptr_hi = get_reg_range(ctx.r[ptr])
-#   return [
-#     f"v_add_u32 {t0}, {rt}{ptr_lo}, {ctx.r[offset]}",     # t0 = ptr_lo + offset
-#     f"v_add_co_ci_u32 {t1}, 0, {rt}{ptr_hi}",             # t1 = ptr_hi + carry-in from vcc
-#     f"flat_load_b{32 * x.dtype.count} {ctx.r[x]}, v[{t0[-1]}:{t1[-1]}]"
-#   ]
-#
-# def render_store(ctx, x, ptr, offset, val) -> List[str]:
-#   t0, t1, _ = ctx.tmp_vregs()
-#   rt = ctx.r[ptr][0]
-#   ptr_lo, ptr_hi = get_reg_range(ctx.r[ptr])
-#   return [
-#     f"v_add_co_ci_u32 {t0}, {rt}{ptr_lo}, {ctx.r[offset]}",     # t0 = ptr_lo + offset
-#     f"v_add_co_ci_u32 {t1}, {rt}{ptr_hi}, 0",          # t1 = ptr_hi + carry-in from vcc
-#     f"flat_store_b{32 * x.src[2].dtype.count} v[{t0[-1]}:{t1[-1]}], {ctx.r[val]}"
-#   ]
-
-
 supports_half: List[Ops] = [Ops.EXP2, Ops.ADD, Ops.MUL, Ops.MAX, Ops.CMPLT, Ops.WHERE]
 doesnt_support_half: Tuple[Ops, ...] = tuple(op for op in asm_for_op.keys() if op not in supports_half)
 rdna3_rewrite = PatternMatcher([
@@ -155,7 +130,7 @@ rdna3_rewrite = PatternMatcher([
 
   *[
     (UPat(op, name="x"), lambda ctx, x, op=op: asm_for_op[(op,)](
-      ctx, ctx.r[x], *[ctx.r[v] for v in x.src], x.dtype, ctx.types[x.dtype]))
+      ctx, ctx.r[x], *[ctx.r[v] for v in x.src], x.dtype, ctx.types[x.src[0].dtype]))
     for op in [
       Ops.RECIP, Ops.EXP2, Ops.LOG2, Ops.SIN, Ops.SQRT,
       Ops.ADD, Ops.MUL, Ops.XOR, Ops.AND, Ops.OR,
@@ -226,7 +201,7 @@ class RDNA3Renderer(Renderer):
                               dtypes.float16: "f16", dtypes.float32: "f32", dtypes.float64: "f64", dtypes.bool: "u32" }
 
   mem_types: Dict[DType, str] =  types.copy()
-  mem_types.update({dtypes.int8: "s8", dtypes.uint8: "u8", dtypes.bool: "u8", dtypes.float16: "b16"})
+  mem_types.update({dtypes.int8: "i8", dtypes.uint8: "u8", dtypes.bool: "u8", dtypes.float16: "b16"})
 
   def tmp_vregs(self):
     return self.tmpv
@@ -246,6 +221,8 @@ class RDNA3Renderer(Renderer):
         # saving vcc state isn't fun. this might be invalid because we also do
         # operations on these predicate registers so I'm not sure what to do.
         self.r[u] = "vcc"
+      elif u.op == Ops.MULACC:
+        self.r[u] = self.r[u.src[0]]
       elif u.op in GroupOp.ALU or u.op == Ops.CONST or u.op == Ops.LOAD: 
         self.r[u] = f"v{self.v_cnt}"
         self.v_cnt += 1
@@ -260,7 +237,7 @@ class RDNA3Renderer(Renderer):
       elif u.op == Ops.DEFINE_GLOBAL:
         size = u.dtype.count * u.dtype.itemsize
         i = u.arg
-        args.append({'.address_space': 'global', '.name': f'buf_{u.arg}', '.offset': i, '.size': size,
+        args.append({'.address_space': 'global', '.name': f'buf_{u.arg}', '.offset': i * 8, '.size': size,
                      '.type_name': u.dtype.name+"*", '.value_kind': 'by_value'})
         self.s_cnt += self.s_cnt%2
         self.r[u] = f"s[{self.s_cnt}:{self.s_cnt+1}]"
@@ -347,10 +324,8 @@ if __name__ == '__main__':
   cmp = UOp(Ops.CMPLT, dtypes.bool, (exp_res, c0_5))
   sel = UOp(Ops.WHERE, dtypes.float32, (cmp, c2, add_res))
 
-  # FMA operation
   mad_res = UOp(Ops.MULACC, dtypes.float32, (sel, c3, input_val))
 
-  # Modulo operation (emulated)
   mod_res = UOp(Ops.MOD, dtypes.float32, (mad_res, c3))
 
   # Store result
