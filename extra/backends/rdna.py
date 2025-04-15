@@ -1,4 +1,6 @@
 from typing import DefaultDict, Dict, List, Union, Optional, cast, Callable, Tuple
+from functools import reduce
+from operator import add,mul
 import struct
 import yaml
 
@@ -75,7 +77,7 @@ def get_regs_contained(reg: str) -> List[int]:
   return [reg]
 
 def render_reg_range(p: str, regs: List[str]) -> str:
-  r = list(sorted(max(map(get_reg_range, regs))))
+  r = list(sorted(reduce(add, map(get_reg_range, regs))))
   if len(r) == 1:
     return f"{p}{r[0]}"
   return f"{p}[{r[0]}:{r[-1]}]"
