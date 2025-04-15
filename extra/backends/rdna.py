@@ -30,32 +30,134 @@ def asm_emulated_mod(ctx, d, a, b, dt, name) -> List[str]:
       f"v_sub_u32 {d}, {a}, {t1}" # a - (a / b) * b
     ]
 
+def render_where(ctx, d, a, b, c, dt, name) -> List[str]:
+    if a == "vcc":
+        return [f"v_cndmask_b32 {d}, {c}, {b}"]
+    return [f"v_cmp_neq_b32 {a}, 0", f"v_cndmask_b32 {d}, {c}, {b}"]
+
 asm_for_op: Dict[Tuple[Ops, ...], Callable] = {
   (Ops.RECIP,): lambda ctx, d, a, dt, name: f"v_rcp_{name} {d}, {a}",
-  (Ops.EXP2,): lambda ctx, d, a, dt, name: f"v_exp_{name} {d}, {a}",
+  (Ops.EXP2,): lambda ctx, d, a, dt, name: f"v_exp_{name} {d}, {a}", # exp is exp2
   (Ops.LOG2,): lambda ctx, d, a, dt, name: f"v_log_{name} {d}, {a}",
   (Ops.SIN,):  lambda ctx, d, a, dt, name: f"v_sin_{name} {d}, {a}",
   (Ops.SQRT,): lambda ctx, d, a, dt, name: f"v_sqrt_{name} {d}, {a}",
   (Ops.SHL,): lambda ctx, d, a, b, dt, name: f"v_lshlrev_b32 {d}, {b}, {a}",
   (Ops.SHR,): lambda ctx, d, a, b, dt, name: f"v_lshrrev_b32 {d}, {b}, {a}",
-  (Ops.ADD,): lambda ctx, d, a, b, dt, name: f"v_add_{name} {d}, {a}, {b}" if dtypes.is_float(dt) else f"v_add_u32 {d}, {a}, {b}",
-  (Ops.MUL,): lambda ctx, d, a, b, dt, name: (
-    f"v_mul_{name} {d}, {a}, {b}" if dtypes.is_float(dt) else f"v_mul_lo_u32 {d}, {a}, {b}"),
+  (Ops.ADD,): lambda ctx, d, a, b, dt, name: f"v_add_{name} {d}, {a}, {b}",
+  (Ops.MUL,): lambda ctx, d, a, b, dt, name: f"v_mul_{name} {d}, {a}, {b}",
   (Ops.XOR,): lambda ctx, d, a, b, dt, name: f"v_xor_b32 {d}, {a}, {b}",
   (Ops.AND,): lambda ctx, d, a, b, dt, name: f"v_and_b32 {d}, {a}, {b}",
   (Ops.OR,):  lambda ctx, d, a, b, dt, name: f"v_or_b32 {d}, {a}, {b}",
   (Ops.IDIV,): lambda ctx, d, a, b, dt, name: f"v_div_fixup_{name} {d}, {a}, {b}, {a}",
-  (Ops.MAX,): lambda ctx, d, a, b, dt, name: f"v_max_{name} {d}, {a}, {b}" if dtypes.is_float(dt) else f"v_max_u32 {d}, {a}, {b}",
+  (Ops.MAX,): lambda ctx, d, a, b, dt, name: f"v_max_{name} {d}, {a}, {b}",
   (Ops.MOD,): lambda ctx, d, a, b, dt, name: asm_emulated_mod(ctx, d, a, b, dt, name),
-  (Ops.CMPLT,): lambda ctx, d, a, b, dt, name: f"v_cmp_nge_{name} {d}, {a}, {b}" if dtypes.is_float(dt) else f"v_cmp_lt_u32 {d}, {a}, {b}",
-  (Ops.CMPNE,): lambda ctx, d, a, b, dt, name: f"v_cmp_neq_{name} {d}, {a}, {b}" if dtypes.is_float(dt) else f"v_cmp_neq_u32 {d}, {a}, {b}",
-  (Ops.MULACC,): lambda ctx, d, a, b, c, dt, name: (
-    f"v_fmac_{name} {d}, {a}, {b}, {c}" if dtypes.is_float(dt) else f"v_mad_{name} {d}, {a}, {b}, {c}"),
-  (Ops.WHERE,): lambda ctx, d, a, b, c, dt, name: ([
-    f"v_cmp_neq_{name} vcc, {a}, 0",
-    f"v_cndmask_b32 {d}, {c}, {b}, vcc"
-  ])
+  (Ops.CMPLT,): lambda ctx, d, a, b, dt, name: f"v_cmp_lt_{name} {a}, {b}",
+  (Ops.CMPNE,): lambda ctx, d, a, b, dt, name: f"v_cmp_neq_{name} {a}, {b}",
+  (Ops.MULACC,): lambda ctx, a, b, c, dt, name: (
+    f"v_fmac_{name} {a}, {b}, {c}" if dtypes.is_float(dt) else f"v_mad_{name} {a}, {b}, {c}"),
+  (Ops.WHERE,): lambda ctx, d, a, b, c, dt, name: render_where(ctx, d, a, b, c, dt, name),
 }
+
+def get_reg_range(reg: str) -> List[int]:
+  if '[' in reg:
+    a, *b = reg[reg.index('[')+1 : reg.index(']')].split(':')
+    return [int(a)] if not b else list(range(int(a), int(b[0]) + 1))
+  i = next(i for i, c in enumerate(reg) if c.isdigit())
+  return [int(reg[i:])]
+
+def get_regs_contained(reg: str) -> List[int]:
+  if 
+  if '[' in reg:
+    a, *b = reg[reg.index('[')+1 : reg.index(']')].split(':')
+    return [f"{reg[0]}{a}"] if not b else list(range(int(a), int(b[0]) + 1))
+  i = next(i for i, c in enumerate(reg) if c.isdigit())
+  return [int(reg[i:])]
+
+def render_addr_calc(ctx, ptr, offset) -> Tuple[List[str], str, str]:
+  instructions = []
+  ptr = ctx.r[ptr]
+  offset = ctx.r[offset]
+
+  ptr_lo, ptr_hi = get_reg_range(ptr)
+  offset_is_scalar = is_scalar(offset_name)
+  ptr_lo_is_scalar = is_scalar(ptr_lo)
+  ptr_hi_is_scalar = is_scalar(ptr_hi)
+
+  addr_lo_v, addr_hi_v, _ = ctx.tmp_vregs() # Get temps for results
+
+  # --- Low 32-bit add: addr_lo_v = ptr_lo + offset_name ---
+  # Ensure second operand (S1) is VGPR for v_add_co_ci_u32
+  if offset_is_scalar:
+    if ptr_lo_is_scalar: # S+S -> need offset in VGPR for S1
+      temp_offset_v, _, _ = ctx.tmp_vregs()
+      instructions.append(f"v_mov_b32 {temp_offset_v}, {offset_name}")
+      instructions.append(f"v_add_co_ci_u32 {addr_lo_v}, {ptr_lo}, {temp_offset_v}") # S0=SGPR, S1=VGPR
+    else: # V+S -> swap operands
+      instructions.append(f"v_add_co_ci_u32 {addr_lo_v}, {offset_name}, {ptr_lo}")   # S0=SGPR, S1=VGPR
+  else: # offset is VGPR
+    # S+V or V+V -> both OK as is, since offset (S1) is VGPR
+    instructions.append(f"v_add_co_ci_u32 {addr_lo_v}, {ptr_lo}, {offset_name}") # S0=any, S1=VGPR
+
+  # --- High 32-bit add: addr_hi_v = ptr_hi + 0 + carry ---
+  # S1 must be VGPR. If ptr_hi is SGPR, it needs to be moved.
+  if ptr_hi_is_scalar:
+    temp_hi_v, _, _ = ctx.tmp_vregs()
+    instructions.append(f"v_mov_b32 {temp_hi_v}, {ptr_hi}")
+    instructions.append(f"v_add_co_ci_u32 {addr_hi_v}, 0, {temp_hi_v}") # S0=imm, S1=VGPR
+  else: # ptr_hi is VGPR
+    instructions.append(f"v_add_co_ci_u32 {addr_hi_v}, 0, {ptr_hi}") # S0=imm, S1=VGPR
+
+  return instructions, addr_lo_v, addr_hi_v
+
+# --- Load/Store Implementations ---
+
+def render_load(ctx, x, ptr, offset_reg) -> List[str]:
+  """Generates instructions for x = FLAT_LOAD(ptr + offset_reg)"""
+  # Determine load size (in bits) from destination register/type info
+  load_bits = 32 * ctx.r[x].dtype.count # Assuming ctx.r[x].dtype.count exists
+
+  addr_setup_ins, addr_lo_v, addr_hi_v = render_addr_calc(ctx, ptr, offset_reg)
+
+  vdata_reg = get_reg_name(ctx.r[x])
+
+  # FLAT format uses v[lo:hi] for address
+  load_ins = f"flat_load_b{load_bits} {vdata_reg}, v[{addr_lo_v}:{addr_hi_v}] offset:0"
+  return addr_setup_ins + [load_ins]
+
+def render_store(ctx, ptr, offset_reg, val) -> List[str]:
+  """Generates instructions for FLAT_STORE(ptr + offset_reg, val)"""
+  # Determine store size (in bits) based on the value register
+  val_reg = ctx.r[val]
+  store_bits = 32 * get_reg_count(val_reg)
+
+  addr_setup_ins, addr_lo_v, addr_hi_v = render_addr_calc(ctx, ptr, offset_reg)
+
+  vdata_reg = get_reg_name(val_reg)
+
+  # FLAT format uses v[lo:hi] for address
+  store_ins = f"flat_store_b{store_bits} v[{addr_lo_v}:{addr_hi_v}], {vdata_reg} offset:0"
+  return addr_setup_ins + [store_ins]
+
+def render_load(ctx, x, ptr, offset) -> List[str]:
+  t0, t1, _ = ctx.tmp_vregs()
+  rt = ctx.r[ptr][0]
+  ptr_lo, ptr_hi = get_reg_range(ctx.r[ptr])
+  return [
+    f"v_add_u32 {t0}, {rt}{ptr_lo}, {ctx.r[offset]}",     # t0 = ptr_lo + offset
+    f"v_add_co_ci_u32 {t1}, 0, {rt}{ptr_hi}",             # t1 = ptr_hi + carry-in from vcc
+    f"flat_load_b{32 * x.dtype.count} {ctx.r[x]}, v[{t0[-1]}:{t1[-1]}]"
+  ]
+
+def render_store(ctx, x, ptr, offset, val) -> List[str]:
+  t0, t1, _ = ctx.tmp_vregs()
+  rt = ctx.r[ptr][0]
+  ptr_lo, ptr_hi = get_reg_range(ctx.r[ptr])
+  return [
+    f"v_add_co_ci_u32 {t0}, {rt}{ptr_lo}, {ctx.r[offset]}",     # t0 = ptr_lo + offset
+    f"v_add_co_ci_u32 {t1}, {rt}{ptr_hi}, 0",          # t1 = ptr_hi + carry-in from vcc
+    f"flat_store_b{32 * x.src[2].dtype.count} v[{t0[-1]}:{t1[-1]}], {ctx.r[val]}"
+  ]
+
 
 supports_half: List[Ops] = [Ops.EXP2, Ops.ADD, Ops.MUL, Ops.MAX, Ops.CMPLT, Ops.WHERE]
 doesnt_support_half: Tuple[Ops, ...] = tuple(op for op in asm_for_op.keys() if op not in supports_half)
@@ -73,11 +175,8 @@ rdna3_rewrite = PatternMatcher([
     ]
   ],
 
-  # HACK:
-  (UPat(Ops.SPECIAL, name="x"), lambda ctx, x: ""),
-
   (UPat(Ops.MULACC, name="x"),
-    lambda ctx, x: asm_for_op[(Ops.MULACC,)](ctx, ctx.r[x], ctx.r[x.src[0]], ctx.r[x.src[1]], ctx.r[x.src[2]], x.dtype, ctx.types[x.dtype])),
+    lambda ctx, x: asm_for_op[(Ops.MULACC,)](ctx, ctx.r[x.src[0]], ctx.r[x.src[1]], ctx.r[x.src[2]], x.dtype, ctx.types[x.dtype])),
 
   (UPat(Ops.WHERE, name="x"),
     lambda ctx, x: asm_for_op[(Ops.WHERE,)](ctx, ctx.r[x], ctx.r[x.src[0]], ctx.r[x.src[1]], ctx.r[x.src[2]], x.dtype, ctx.types[x.dtype])),
@@ -87,15 +186,12 @@ rdna3_rewrite = PatternMatcher([
   (UPat(Ops.MOD, name="x"),
     lambda ctx, x: asm_for_op[(Ops.MOD,)](ctx, ctx.r[x], ctx.r[x.src[0]], ctx.r[x.src[1]], x.dtype, ctx.types[x.dtype])),
 
-  (UPat(Ops.LOAD, name="x", src=(UPat.var("ptr"), UPat.var("offset"))), lambda ctx, x, ptr, offset: (
-    f"s_load_b32 {ctx.r[x]}, {ctx.r[ptr]}, {ctx.r[offset]}" if x.dtype.count == 1 and ctx.r[x].startswith('s') else
-    f"global_load_b{32 * x.dtype.count} {ctx.r[x]}, {ctx.r[ptr]}, {ctx.r[offset]}"
-  )),
+  (UPat(Ops.LOAD, name="x", src=(UPat.var("ptr"), UPat.var("offset"))), lambda ctx, x, ptr, offset:
+    render_load(ctx, x, ptr, offset)
+  ),
 
   (UPat(Ops.STORE, name="x", src=(UPat.var("ptr"), UPat.var("offset"), UPat.var("val"))), 
-   lambda ctx, x, ptr, offset, val: (
-     f"global_store_b{32 * x.src[2].dtype.count} {ctx.r[val]}, {ctx.r[offset]}, {ctx.r[offset]}"
-  )),
+   lambda ctx, x, ptr, offset, val: render_store(ctx, x, ptr, offset, val))
 ])
 
 # TODO:
@@ -137,9 +233,9 @@ class RDNA3Renderer(Renderer):
   # barrier = "bar.sync\t0;"
   supports_half = supports_half
   # HACK: Use s16 and u16 for int8 and uint8 buffers. This can be wrong in cast.
-  types: Dict[DType, str] = { dtypes.int8: "s16", dtypes.int16: "s16", dtypes.int32: "s32", dtypes.int64: "s64",
+  types: Dict[DType, str] = { dtypes.int8: "i16", dtypes.int16: "i16", dtypes.int32: "i32", dtypes.int64: "i64",
                               dtypes.uint8: "u16", dtypes.uint16: "u16", dtypes.uint32: "u32", dtypes.uint64: "u64",
-                              dtypes.float16: "f16", dtypes.float32: "f32", dtypes.float64: "f64", dtypes.bool: "pred" }
+                              dtypes.float16: "f16", dtypes.float32: "f32", dtypes.float64: "f64", dtypes.bool: "u32" }
 
   mem_types: Dict[DType, str] =  types.copy()
   mem_types.update({dtypes.int8: "s8", dtypes.uint8: "u8", dtypes.bool: "u8", dtypes.float16: "b16"})
@@ -157,21 +253,27 @@ class RDNA3Renderer(Renderer):
     args: List[dict] = []
 
     for u in uops:
-      # allocate registers
-      if u.op in GroupOp.ALU or u.op == Ops.CONST or u.op == Ops.LOAD:
+      if u.op in {Ops.CMPLT, Ops.CMPNE}:
+        # HACK: this will not be valid if we do another comparison in the way.
+        # saving vcc state isn't fun. this might be invalid because we also do
+        # operations on these predicate registers so I'm not sure what to do.
+        self.r[u] = "vcc"
+      elif u.op in GroupOp.ALU or u.op == Ops.CONST or u.op == Ops.LOAD: 
         self.r[u] = f"v{self.v_cnt}"
         self.v_cnt += 1
-      if u.op == Ops.SPECIAL:
+      elif u.op == Ops.SPECIAL:
         if u.arg[1].startswith("lidx"):
           self.r[u] = f'v{u.arg[0]}'
         elif u.arg[1].startswith("gidx"):
           self.r[u] = f's{2+u.arg[0]}'
         else:
           raise NotImplementedError
+        continue
       elif u.op == Ops.DEFINE_GLOBAL:
+        size = u.dtype.count * u.dtype.itemsize
         i = u.arg
-        args.append({'.address_space': 'global', '.name': f'buf_{i}', '.offset': i*8, '.size': 8,
-                     '.type_name': u.dtype.name+"*", '.value_kind': 'global_buffer'})
+        args.append({'.address_space': 'global', '.name': f'buf_{u.arg}', '.offset': i, '.size': size,
+                     '.type_name': u.dtype.name+"*", '.value_kind': 'by_value'})
         self.s_cnt += self.s_cnt%2
         self.r[u] = f"s[{self.s_cnt}:{self.s_cnt+1}]"
         self.s_cnt += 2
