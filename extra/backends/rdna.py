@@ -71,8 +71,14 @@ def get_regs_contained(reg: str) -> List[int]:
 
   if '[' in reg:
     a, *b = reg[reg.index('[')+1 : reg.index(']')].split(':')
-    return [f"{reg[0]}{a}"] if not b else [f"{reg[0]{i}}" for i in range(int(a), int(b[0]) + 1)]
+    return [f"{reg[0]}{a}"] if not b else [f"{reg[0]}{i}" for i in range(int(a), int(b[0]) + 1)]
   return [reg]
+
+def render_reg_range(p: str, regs: List[str]) -> str:
+  r = list(sorted(max(map(get_reg_range, regs))))
+  if len(r) == 1:
+    return f"{p}{r[0]}"
+  return f"{p}[{r[0]}:{r[-1]}]"
 
 def render_addr_calc(ctx, ptr, offset) -> Tuple[List[str], str, str]:
   instructions = []
@@ -80,24 +86,18 @@ def render_addr_calc(ctx, ptr, offset) -> Tuple[List[str], str, str]:
   offset = ctx.r[offset]
 
   ptr_lo, ptr_hi = get_regs_contained(ptr)
-  offset_is_scalar = 
-  ptr_lo_is_scalar = 
-  ptr_hi_is_scalar = 
-
   addr_lo_v, addr_hi_v, _ = ctx.tmp_vregs() # Get temps for results
 
-  # --- Low 32-bit add: addr_lo_v = ptr_lo + offset_name ---
-  # Ensure second operand (S1) is VGPR for v_add_co_ci_u32
   if offset[0] == 's':
     if ptr_lo[0] == 's': # S+S -> need offset in VGPR for S1
       temp_offset_v, _, _ = ctx.tmp_vregs()
-      instructions.append(f"v_mov_b32 {temp_offset_v}, {offset_name}")
+      instructions.append(f"v_mov_b32 {temp_offset_v}, {offset}")
       instructions.append(f"v_add_co_ci_u32 {addr_lo_v}, {ptr_lo}, {temp_offset_v}") # S0=SGPR, S1=VGPR
     else: # V+S -> swap operands
-      instructions.append(f"v_add_co_ci_u32 {addr_lo_v}, {offset_name}, {ptr_lo}")   # S0=SGPR, S1=VGPR
+      instructions.append(f"v_add_co_ci_u32 {addr_lo_v}, {offset}, {ptr_lo}")   # S0=SGPR, S1=VGPR
   else: # offset is VGPR
     # S+V or V+V -> both OK as is, since offset (S1) is VGPR
-    instructions.append(f"v_add_co_ci_u32 {addr_lo_v}, {ptr_lo}, {offset_name}") # S0=any, S1=VGPR
+    instructions.append(f"v_add_co_ci_u32 {addr_lo_v}, {ptr_lo}, {offset}") # S0=any, S1=VGPR
 
   # --- High 32-bit add: addr_hi_v = ptr_hi + 0 + carry ---
   # S1 must be VGPR. If ptr_hi is SGPR, it needs to be moved.
@@ -110,18 +110,18 @@ def render_addr_calc(ctx, ptr, offset) -> Tuple[List[str], str, str]:
 
   return instructions, addr_lo_v, addr_hi_v
 
-def render_load(ctx, x, ptr, offset_reg) -> List[str]:
+def render_load(ctx, x, ptr, offset) -> List[str]:
   load_bits = 32 * x.dtype.count
 
-  addr_setup_ins, addr_lo_v, addr_hi_v = render_addr_calc(ctx, ptr, offset_reg)
+  addr_setup_ins, addr_lo_v, addr_hi_v = render_addr_calc(ctx, ptr, offset)
 
-  load_ins = f"flat_load_b{load_bits} {ctx.r[x]}, v[{addr_lo_v}:{addr_hi_v}] offset:0"
+  load_ins = f"flat_load_b{load_bits} {ctx.r[x]}, {render_reg_range('v', [addr_lo_v, addr_hi_v])} offset:0"
   return addr_setup_ins + [load_ins]
 
-def render_store(ctx, ptr, offset_reg, val) -> List[str]:
+def render_store(ctx, x, ptr, offset, val) -> List[str]:
   store_bits = 32 * x.dtype.count
-  addr_setup_ins, addr_lo_v, addr_hi_v = render_addr_calc(ctx, ptr, offset_reg)
-  store_ins = f"flat_store_b{store_bits} v[{addr_lo_v}:{addr_hi_v}], {ctx.r[val]} offset:0"
+  addr_setup_ins, addr_lo_v, addr_hi_v = render_addr_calc(ctx, ptr, offset)
+  store_ins = f"flat_store_b{store_bits} {render_reg_range('v', [addr_lo_v, addr_hi_v])}, {ctx.r[val]} offset:0"
   return addr_setup_ins + [store_ins]
 
 # def render_load(ctx, x, ptr, offset) -> List[str]:
